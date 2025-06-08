@@ -6,49 +6,7 @@ from model import StressPredictor
 from sklearn.model_selection import train_test_split
 import json
 
-def load_stress_data(stress_path):
-    """
-    从JSON文件加载压力水平数据
-    参数:
-        stress_path: 包含压力数据文件的目录路径
-    返回:
-        包含压力水平记录的DataFrame
-    """
-    stress_data = []
-    stress_files = list(stress_path.glob('*.json'))
-    
-    for f in stress_files:
-        try:
-            # 从文件名中提取用户ID
-            user_id = str(f.stem).split('_')[1]
-            with open(f, 'r') as file:
-                data = json.load(file)
-                if isinstance(data, list):
-                    for entry in data:
-                        if isinstance(entry, dict):
-                            # 提取时间戳和压力水平
-                            timestamp = entry.get('resp_time', 0)
-                            level = entry.get('level')
-                            
-                            if timestamp and level is not None:
-                                try:
-                                    stress_level = int(level)
-                                    stress_data.append({
-                                        'timestamp': timestamp,
-                                        'stress_level': stress_level,
-                                        'user_id': user_id
-                                    })
-                                except (ValueError, TypeError):
-                                    continue
-        except Exception as e:
-            print(f"警告: 加载压力文件 {f} 时出错: {e}")
-    
-    if stress_data:
-        df = pd.DataFrame(stress_data)
-        return df
-    else:
-        print("警告: 未找到有效的压力数据")
-        return pd.DataFrame(columns=['timestamp', 'stress_level', 'user_id'])
+
 
 def extract_location(loc_str):
     """
@@ -150,8 +108,8 @@ def load_data(data_dir):
             df = pd.read_csv(f)
             if 'start_timestamp' in df.columns:
                 df = df.rename(columns={'start_timestamp': 'timestamp'})
-                if 'end_timestamp' in df.columns and 'timestamp' in df.columns:
-                    df['duration'] = df['end_timestamp'] - df['timestamp']
+                if ' end_timestamp' in df.columns and 'timestamp' in df.columns:
+                    df['duration'] = df[' end_timestamp'] - df['timestamp']
                 df['user_id'] = user_id
                 conversation_data.append(df)
         except Exception as e:
@@ -160,7 +118,7 @@ def load_data(data_dir):
         data['conversation'] = pd.concat(conversation_data, ignore_index=True)
     else:
         print("警告: 未找到有效的对话数据")
-        data['conversation'] = pd.DataFrame(columns=['timestamp', 'duration', 'location', 'user_id'])
+        data['conversation'] = pd.DataFrame(columns=['timestamp', 'duration', 'user_id'])
     
     # 加载音频数据
     print("正在加载音频数据...")
@@ -171,11 +129,13 @@ def load_data(data_dir):
         try:
             user_id = str(f.stem).split('_')[-1]
             df = pd.read_csv(f)
+            if ' audio inference' in df.columns:
+                df = df.rename(columns={' audio inference': 'audio_type'})
+            audio_map={0:'silence',1:'voice',2:'noise',3:'unknown'}
+            df['audio_type'] = df['audio_type'].map(audio_map).fillna('unknown')
             if 'timestamp' in df.columns:
-                df['user_id'] = user_id
-                if 'audio' in df.columns:
-                    df = df.rename(columns={'audio': 'audio_type'})
-                audio_data.append(df)
+                df['user_id']=user_id
+            audio_data.append(df)
         except Exception as e:
             print(f"警告: 加载文件 {f} 时出错: {e}")
     if audio_data:
@@ -184,7 +144,7 @@ def load_data(data_dir):
         print("警告: 未找到有效的音频数据")
         data['audio'] = pd.DataFrame(columns=['timestamp', 'audio_type', 'user_id'])
     
-    # 加载蓝牙数据
+    # 加载蓝牙数据（保留原始设备记录）
     print("正在加载蓝牙数据...")
     bluetooth_path = Path(data_dir) / 'sensing/bluetooth'
     bluetooth_files = list(bluetooth_path.glob('*.csv'))
@@ -195,23 +155,23 @@ def load_data(data_dir):
             chunks = pd.read_csv(f, chunksize=10000)
             df = pd.concat(chunks)
             if 'time' in df.columns:
-                df=df.rename(columns={'time':'timestamp'})
-            else:
-                print(f"警告: 文件 {f} 缺少 time 列")
+                df = df.rename(columns={'time': 'timestamp'})
+            elif 'timestamp' not in df.columns:
+                print(f"警告: 文件 {f} 缺少时间戳列")
                 continue
-            # 按timesiamp 分组统计每个时间点的设备数
-            device_counts = df.groupby('timestamp').size().reset_index(name='device_count')
-            device_counts['user_id'] = user_id
-            bluetooth_data.append(device_counts)
+            
+            # 保留原始蓝牙扫描记录
+            df['user_id'] = user_id
+            bluetooth_data.append(df[['timestamp', 'user_id']])  # 只需时间戳和用户ID
         except Exception as e:
             print(f"警告: 加载文件 {f} 时出错: {e}")
     if bluetooth_data:
         data['bluetooth'] = pd.concat(bluetooth_data, ignore_index=True)
     else:
         print("警告: 未找到有效的蓝牙数据")
-        data['bluetooth'] = pd.DataFrame(columns=['timestamp', 'device_count', 'user_id'])
+        data['bluetooth'] = pd.DataFrame(columns=['timestamp', 'user_id'])
     
-    # 加载屏幕数据
+    # 加载屏幕数据（添加事件类型）
     print("正在加载屏幕数据...")
     screen_path = Path(data_dir) / 'sensing/phonelock'
     screen_files = list(screen_path.glob('*.csv'))
@@ -223,6 +183,7 @@ def load_data(data_dir):
             if 'start' in df.columns and 'end' in df.columns:
                 df['timestamp'] = df['start']
                 df['duration'] = df['end'] - df['start']
+                df['event'] = 'lock'  # 添加事件类型列
                 df['user_id'] = user_id
                 screen_data.append(df)
         except Exception as e:
@@ -231,21 +192,81 @@ def load_data(data_dir):
         data['screen'] = pd.concat(screen_data, ignore_index=True)
     else:
         print("警告: 未找到有效的屏幕数据")
-        data['screen'] = pd.DataFrame(columns=['timestamp', 'duration', 'user_id'])
+        data['screen'] = pd.DataFrame(columns=['timestamp', 'duration', 'event', 'user_id'])
     
-    # 加载压力数据
+    # 加载压力数据（修复格式处理）
     print("正在加载压力数据...")
     stress_path = Path(data_dir) / 'EMA/response/Stress'
-    data['stress'] = load_stress_data(stress_path)
+    stress_data = []
+    stress_files = list(stress_path.glob('*.json'))
+    
+    for f in stress_files:
+        try:
+            # 从文件名中提取用户ID
+            user_id = str(f.stem).split('_')[1]
+            with open(f, 'r') as file:
+                json_content = json.load(file)  # 重命名变量避免冲突
+                # 处理不同格式的压力数据
+                if isinstance(json_content, list):
+                    for entry in json_content:
+                        if isinstance(entry, dict):
+                            # 提取时间戳和压力水平
+                            timestamp = entry.get('resp_time', entry.get('timestamp', 0))
+                            level = entry.get('level')
+                            
+                            if timestamp and level is not None:
+                                try:
+                                    stress_level = int(level)
+                                    if stress_level in {1,2,3}:
+                                        stress_level=1
+                                    elif stress_level in {4,5}:
+                                        stress_level=0
+                                    else:
+                                        stress_level='unknown'
+                                    stress_data.append({
+                                        'timestamp': timestamp,
+                                        'stress_level': stress_level,
+                                        'user_id': user_id
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+                elif isinstance(json_content, dict):
+                    # 处理单条记录格式
+                    timestamp = json_content.get('resp_time', json_content.get('timestamp', 0))
+                    level = json_content.get('level')
+                    if timestamp and level is not None:
+                        try:
+                            stress_level = int(level)
+                            if stress_level in {1,2,3}:
+                                stress_level=1
+                            elif stress_level in {4,5}:
+                                stress_level=0
+                            else:
+                                stress_level='unknown'
+                            stress_data.append({
+                                'timestamp': timestamp,
+                                'stress_level': stress_level,
+                                'user_id': user_id
+                            })
+                        except (ValueError, TypeError):
+                            continue
+        except Exception as e:
+            print(f"警告: 加载压力文件 {f} 时出错: {e}")
+    
+    if stress_data:
+        data['stress'] = pd.DataFrame(stress_data)
+    else:
+        print("警告: 未找到有效的压力数据")
+        data['stress'] = pd.DataFrame(columns=['timestamp', 'stress_level', 'user_id'])
     
     # 基于WiFi数据中的实际位置创建POI位置映射
     if len(data['wifi']) > 0:
         unique_locations = data['wifi']['wifi_ap'].unique()
         data['poi_locations'] = pd.DataFrame({
             'wifi_ap': unique_locations,
-            'poi_type': ['teaching' if any(x in loc.lower() for x in ['hall', 'library', 'lab', 'sudikoff','lsb','mclaughlin','carson-tech','sudikoff','baker-berry','presidents_house'])
-                        else 'accommodation' if any(x in loc.lower() for x in ['dorm', 'residence', 'inn','hanoverrinn','dartmouth_hall','websterhall','reed'])
-                        else 'eating_health' if any(x in loc.lower() for x in ['dining', 'food', 'health','venues-press','fairchild'])
+            'poi_type': ['teaching' if any(x in loc.lower() for x in ['hall', 'library', 'lab', 'sudikoff','lsb','mclaughlin','carson-tech','sudikoff','baker-berry','presidents_house','baker-berry','steele','burke','rollins-chapel','ropeferry','vail','remsen','parkhurst','hanoverpsych','kemeny','moore','batrlett','thornton','remote_offices_HREAP','maclean','kellogg','sanborn','cummings','murdough','tllc','ripley','presidents_house','french'])
+                        else 'accommodation' if any(x in loc.lower() for x in ['dorm', 'residence', 'inn','hanoverrinn','dartmouth_hall','websterhall','reed','east-wheelock','topliff','fayerweather','Mckenzie','north-park','lodge','massrow','butterfield','fahey-mclane','gile','newhamp','maxwell','streeter','buchanan','lord','hitchcock','Cohen','channing-cox','richardson','bissell','evergreen'])
+                        else 'eating_health' if any(x in loc.lower() for x in ['dining', 'food', 'health','venues-press','fairchild','college-street','hopkins','robinson','53_commons','7-lebanon','sport-venues','softballfield','berry_sports_center','occum','external','aquinas'])
                         else 'other'
                         for loc in unique_locations]
         })
@@ -262,6 +283,7 @@ def load_data(data_dir):
     # print(data['screen'].head(10))
     # print(data['stress'].head(10))
     # print(data['wifi'].head(10))
+    
     # 打印数据统计信息
     print("\n数据统计:")
     for key, df in data.items():
@@ -276,7 +298,7 @@ def load_data(data_dir):
 
 def preprocess_data(data):
     """
-    预处理和对齐数据
+    预处理和对齐数据（优化内存使用）
     参数:
         data: 原始数据字典
     返回:
@@ -288,16 +310,12 @@ def preprocess_data(data):
     features = []
     labels = []
     user_ids = []
+    unlabel_features=[]
     
     # 检查是否有足够的数据进行处理
     if len(data['stress']) == 0:
         print("错误: 没有可用的压力数据")
         return np.array([]), np.array([]), [], []
-    
-    # 如果时间戳是字符串，批量转换为数值类型
-    for key in data:
-        if isinstance(data[key], pd.DataFrame) and 'timestamp' in data[key].columns:
-            data[key]['timestamp'] = pd.to_numeric(data[key]['timestamp'], errors='coerce')
     
     # 按用户分组数据
     users = data['stress']['user_id'].unique()
@@ -306,107 +324,124 @@ def preprocess_data(data):
     # 预处理poi_locations
     poi_locations = data['poi_locations']
     
-    # 并行处理所有用户的压力测量
-    from concurrent.futures import ThreadPoolExecutor
-    import time
-    
-    start_time = time.time()
-    
-    def process_user(user_id):
-        user_features = []
-        user_labels = []
-        user_ids_list = []
+    # 优化内存使用：按用户加载数据
+    for user_id in users:
+        print(f"处理用户: {user_id}")
         
         # 获取用户的压力标签
-        user_stress = data['stress'][data['stress']['user_id'] == user_id]
+        user_stress = data['stress'][data['stress']['user_id'] == user_id].copy()
         
-        # 获取用户的传感器数据
-        user_data = {
-            'wifi': data['wifi'][data['wifi']['user_id'] == user_id],
-            'activity': data['activity'][data['activity']['user_id'] == user_id],
-            'conversation': data['conversation'][data['conversation']['user_id'] == user_id],
-            'audio': data['audio'][data['audio']['user_id'] == user_id],
-            'bluetooth': data['bluetooth'][data['bluetooth']['user_id'] == user_id],
-            'screen': data['screen'][data['screen']['user_id'] == user_id],
-            'poi_locations': poi_locations
-        }
+        # 按需加载用户数据，减少内存占用
+        user_data = {}
+        for sensor in ['wifi', 'activity', 'conversation', 'audio', 'bluetooth', 'screen']:
+            if sensor in data and 'user_id' in data[sensor].columns:
+                # 使用query优化内存使用
+                user_data[sensor] = data[sensor].query(f"user_id == '{user_id}'").copy()
+            else:
+                user_data[sensor] = pd.DataFrame()
+        
+        # 添加POI位置映射
+        user_data['poi_locations'] = poi_locations
+        
+        # 如果时间戳是字符串，转换为数值类型
+        for sensor in ['wifi', 'activity', 'conversation', 'audio', 'bluetooth', 'screen']:
+            if not user_data[sensor].empty and 'timestamp' in user_data[sensor].columns:
+                user_data[sensor]['timestamp'] = pd.to_numeric(
+                    user_data[sensor]['timestamp'], errors='coerce')
+                # 按时间戳排序
+                user_data[sensor] = user_data[sensor].sort_values('timestamp')
         
         # 检查用户是否有足够的传感器数据
         if all(len(df) == 0 for df in user_data.values() if isinstance(df, pd.DataFrame) and df.columns.any() and df is not user_data['poi_locations']):
             print(f"警告: 用户 {user_id} 没有传感器数据")
-            return [], [], []
+            continue
         
-        # 对传感器数据按时间戳排序，提高窗口查询效率
-        for sensor in ['wifi', 'activity', 'conversation', 'audio', 'bluetooth', 'screen']:
-            if len(user_data[sensor]) > 0 and 'timestamp' in user_data[sensor].columns:
-                user_data[sensor] = user_data[sensor].sort_values('timestamp')
+        user_features = []
+        user_labels = []
+        user_unlabel_features=[]
         
-        # 对压力数据进行批量处理以减少循环次数
-        valid_features = 0
-        batch_size = 10  # 每批处理的压力测量数
-        
-        for i in range(0, len(user_stress), batch_size):
-            batch = user_stress.iloc[i:i+batch_size]
-            
-            for _, stress_row in batch.iterrows():
-                try:
-                    timestamp = float(stress_row['timestamp'])
-                    
-                    # 获取压力测量前24小时窗口内的数据 - 使用向量化操作
-                    window_start = timestamp - 24*3600
-                    window_data = {
-                        'wifi': user_data['wifi'][user_data['wifi']['timestamp'].between(window_start, timestamp)],
-                        'activity': user_data['activity'][user_data['activity']['timestamp'].between(window_start, timestamp)],
-                        'conversation': user_data['conversation'][user_data['conversation']['timestamp'].between(window_start, timestamp)],
-                        'audio': user_data['audio'][user_data['audio']['timestamp'].between(window_start, timestamp)],
-                        'bluetooth': user_data['bluetooth'][user_data['bluetooth']['timestamp'].between(window_start, timestamp)],
-                        'screen': user_data['screen'][user_data['screen']['timestamp'].between(window_start, timestamp)],
-                        'poi_locations': user_data['poi_locations']
-                    }
-                    
-                    # 检查是否有足够的数据点 - 使用高效的长度检查
-                    min_data_points = 10  # 每种传感器数据至少需要的数据点数
-                    if any(len(df) >= min_data_points for df in window_data.values() if isinstance(df, pd.DataFrame) and df.columns.any() and df is not window_data['poi_locations']):
-                        window_features = feature_extractor.extract_all_features(window_data)
-                        user_features.append(window_features)
-                        user_labels.append(stress_row['stress_level'])
-                        user_ids_list.append(user_id)
-                        valid_features += 1
-                except Exception as e:
-                    print(f"警告: 处理用户 {user_id} 的压力测量时出错: {e}")
-                    continue
-        
-        print(f"为用户 {user_id} 提取了 {valid_features} 个有效特征集")
-        return user_features, user_labels, user_ids_list
-    
-    # 使用线程池并行处理不同用户的数据
-    all_results = []
-    with ThreadPoolExecutor(max_workers=min(8, len(users))) as executor:
-        all_results = list(executor.map(process_user, users))
-    
-    # 合并所有用户的结果
-    for user_features, user_labels, user_ids_list in all_results:
+
+        # 处理每个压力测量点
+        for _, stress_row in user_stress.iterrows():
+            try:
+                timestamp = float(stress_row['timestamp'])
+                # 获取压力测量前24小时窗口内的数据
+                window_start = timestamp - 24*3600
+                window_end = timestamp
+                
+                # 创建时间窗口数据字典
+                window_data = {}
+                for sensor in ['wifi', 'activity', 'conversation', 'audio', 'bluetooth', 'screen']:
+                    if sensor in user_data and not user_data[sensor].empty:
+                        sensor_df = user_data[sensor]
+                        # 过滤时间窗口内的数据
+                        mask = (sensor_df['timestamp'] >= window_start) & (sensor_df['timestamp'] <= window_end)
+                        window_data[sensor] = sensor_df[mask].copy()
+                    else:
+                        window_data[sensor] = pd.DataFrame()
+                
+                # 添加POI位置映射
+                window_data['poi_locations'] = user_data['poi_locations']
+                # 检查是否有足够的数据点
+                min_data_points = 10  # 每种传感器数据至少需要的数据点数
+                if any(len(df) >= min_data_points for df in window_data.values() if isinstance(df, pd.DataFrame) and df.columns.any() and df is not window_data['poi_locations']):
+                    window_features = feature_extractor.extract_all_features(window_data)
+                    user_features.append(window_features)
+                    user_labels.append(stress_row['stress_level'])
+                
+            except Exception as e:
+                print(f"警告: 处理用户 {user_id} 的压力测量时出错: {e}")
+                continue
+
+        # 添加到总数据集
         features.extend(user_features)
         labels.extend(user_labels)
-        user_ids.extend(user_ids_list)
-    
-    end_time = time.time()
-    print(f"特征提取总耗时: {end_time - start_time:.2f} 秒")
-    
+        user_ids.extend([user_id] * len(user_features))
+        
+        print(f"为用户 {user_id} 提取了 {len(user_features)} 个有效特征集")
+        if len(user_stress) > 0:
+            unlabel_number=max(0,100-len(user_stress))
+            if unlabel_number>0:
+                print(f"为用户{user_id}生成{unlabel_number}组未标记数据")
+                first_stress_time=user_stress['timestamp'].min()
+                for i in range(1,unlabel_number+1):
+                    Window_start=first_stress_time+i*24*3600
+                    Window_end=Window_start+24*3600
+                    # 创建时间窗口数据字典
+                    Window_data = {}
+                    for sensor in ['wifi', 'activity', 'conversation', 'audio', 'bluetooth', 'screen']:
+                        if sensor in user_data and not user_data[sensor].empty:
+                            sensor_df = user_data[sensor]
+                            # 过滤时间窗口内的数据
+                            mask = (sensor_df['timestamp'] >= Window_start) & (sensor_df['timestamp'] <= Window_end)
+                            Window_data[sensor] = sensor_df[mask].copy()
+                        else:
+                            Window_data[sensor] = pd.DataFrame()
+                
+                    # 添加POI位置映射
+                    Window_data['poi_locations'] = user_data['poi_locations']
+                    # 检查是否有足够的数据点
+                    min_data_points = 10  # 每种传感器数据至少需要的数据点数
+                    if any(len(df) >= min_data_points for df in Window_data.values() if isinstance(df, pd.DataFrame) and df.columns.any() and df is not Window_data['poi_locations']):
+                        Window_features = feature_extractor.extract_all_features(Window_data)
+                        user_unlabel_features.append(Window_features)
+
+        unlabel_features.extend(user_unlabel_features)
+                
     if not features:
         print("错误: 无法提取有效特征")
         return np.array([]), np.array([]), [], []
     
-    # 将特征转换为矩阵 - 使用numpy的向量化操作
-    feature_names = list(features[0].keys())
+    # 将特征转换为矩阵
+    feature_names = list(features[0].keys()) if features else []
+    X_unlabel=np.array([[f.get(name, 0) for name in feature_names] for f in unlabel_features])
     X = np.array([[f.get(name, 0) for name in feature_names] for f in features])
     y = np.array(labels)
     
     print(f"最终数据集形状: X: {X.shape}, y: {y.shape}")
     print(f"特征数量: {len(feature_names)}")
-    print("特征名称:", feature_names)
     
-    return X, y, user_ids, feature_names
+    return X, y, user_ids, feature_names,X_unlabel
 
 def main():
     """
@@ -422,48 +457,39 @@ def main():
     
     # 预处理数据
     print("正在预处理数据...")
-    X, y, user_ids, feature_names = preprocess_data(data)
+    X, y, user_ids, feature_names,X_unlabeled = preprocess_data(data)
     
-    # 将用户分为有标签和无标签集
-    unique_users = np.unique(user_ids)
-    n_labeled_users = len(unique_users) // 2
-    labeled_users = np.random.choice(unique_users, n_labeled_users, replace=False)
     
-    labeled_mask = np.isin(user_ids, labeled_users)
-    X_labeled = X[labeled_mask]
-    y_labeled = y[labeled_mask]
-    X_unlabeled = X[~labeled_mask]
-    y_unlabeled = y[~labeled_mask]  # 仅用于评估
     
     # 将有标签数据分为训练集和测试集
     X_train, X_test, y_train, y_test = train_test_split(
-        X_labeled, y_labeled, test_size=0.2, random_state=42
+        X , y, test_size=0.2, random_state=42
     )
     
     # 初始化和训练模型
     print("正在训练模型...")
     model = StressPredictor(n_estimators=100, max_depth=10)
     
-    # 初始训练
+    # 初始训练（使用无标签数据的特征，不使用其标签）
     model.train_initial(X_train, y_train, X_unlabeled)
     
-    # 协同训练
+    # 协同训练（使用无标签数据的特征，不使用其标签）
     print("正在进行协同训练...")
     model.co_training(X_train, y_train, X_unlabeled)
     
-    # 评估
-    print("正在评估模型...")
-    metrics = model.evaluate(X_test, y_test)
+    # 评估测试集性能
+    print("正在评估测试集性能...")
+    test_metrics = model.evaluate(X_test,y_test)
     
     print("\n测试集性能:")
-    for metric, value in metrics.items():
+    for metric, value in test_metrics.items():
         print(f"{metric}: {value:.4f}")
     
-    # 在无标签数据上评估
-    unlabeled_metrics = model.evaluate(X_unlabeled, y_unlabeled)
-    print("\n无标签集性能:")
-    for metric, value in unlabeled_metrics.items():
-        print(f"{metric}: {value:.4f}")
+    # 保存训练好的模型
+    import joblib
+    model_path = "trained_model.pkl"
+    joblib.dump(model, model_path)
+    print(f"模型已保存到 {model_path}")
     
     # 打印特征重要性
     if model.selected_features is not None and feature_names:
@@ -473,4 +499,4 @@ def main():
                 print(f"- {feature_names[i]}")
 
 if __name__ == "__main__":
-    main() 
+    main()

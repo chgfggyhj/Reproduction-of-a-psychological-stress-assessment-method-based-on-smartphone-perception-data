@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 class FeatureExtractor:
     """
@@ -64,9 +65,7 @@ class FeatureExtractor:
             for poi in poi_types:
                 features[f'poi_{poi}_day'] = day_counts.get(poi, 0)
                 features[f'poi_{poi}_night'] = night_counts.get(poi, 0)
-            
-            # 移除熵特征计算以提升性能
-            # (保留基础POI计数特征)
+
             
         except Exception as e:
             print(f"POI特征提取错误: {e}")
@@ -132,8 +131,6 @@ class FeatureExtractor:
                 features[f'activity_{activity}_day'] = day_counts.get(activity, 0)
                 features[f'activity_{activity}_night'] = night_counts.get(activity, 0)
             
-            # 移除熵特征计算以提升性能
-            
         except Exception as e:
             print(f"活动特征提取错误: {e}")
             # 设置默认值
@@ -191,11 +188,11 @@ class FeatureExtractor:
                 for audio_type in ['silence', 'voice', 'noise']:
                     features[f'audio_{audio_type}_day'] = 0
                     features[f'audio_{audio_type}_night'] = 0
-            else:
-                # 没有音频数据时的默认值
-                for audio_type in ['silence', 'voice', 'noise']:
-                    features[f'audio_{audio_type}_day'] = 0
-                    features[f'audio_{audio_type}_night'] = 0
+        else:
+            # 没有音频数据时的默认值
+            for audio_type in ['silence', 'voice', 'noise']:
+                features[f'audio_{audio_type}_day'] = 0
+                features[f'audio_{audio_type}_night'] = 0
         
         # 处理对话数据 - 向量化操作
         if len(conversation_data) > 0:
@@ -214,9 +211,9 @@ class FeatureExtractor:
                 else:
                     conversation_data['duration'] = pd.to_numeric(conversation_data['duration'], errors='coerce').fillna(0)
                 
-                # 确保location列存在
-                if 'location' not in conversation_data.columns:
-                    conversation_data['location'] = 'unknown'
+                # # 确保location列存在
+                # if 'location' not in conversation_data.columns:
+                #     conversation_data['location'] = 'unknown'
                 
                 # 检测白天/夜晚
                 day_mask = (conversation_data['hour'] >= self.day_start) & (conversation_data['hour'] < self.day_end)
@@ -226,14 +223,7 @@ class FeatureExtractor:
                 features['conv_count_night'] = (~day_mask).sum()
                 features['conv_duration_day'] = conversation_data.loc[day_mask, 'duration'].sum()
                 features['conv_duration_night'] = conversation_data.loc[~day_mask, 'duration'].sum()
-                
-                # 按位置分组计算对话统计量
-                poi_types = ['teaching', 'accommodation', 'eating_health']
-                for poi in poi_types:
-                    poi_mask = conversation_data['location'] == poi
-                    features[f'conv_count_{poi}'] = poi_mask.sum()
-                    features[f'conv_duration_{poi}'] = conversation_data.loc[poi_mask, 'duration'].sum()
-                
+
             except Exception as e:
                 print(f"对话特征提取错误: {e}")
                 # 设置默认值
@@ -254,6 +244,96 @@ class FeatureExtractor:
                 features[f'conv_count_{poi}'] = 0
                 features[f'conv_duration_{poi}'] = 0
             
+        return features
+
+    def extract_bluetooth_features(self, bluetooth_data):
+        """
+        提取蓝牙传感器特征
+        参数:
+            bluetooth_data: 蓝牙数据DataFrame
+        返回:
+            包含蓝牙特征的字典
+        """
+        # 定义POI类型列表
+        poi_types = ['teaching', 'accommodation', 'eating_health']
+        features = {}
+        
+        if bluetooth_data is None or bluetooth_data.empty:
+            # 默认特征
+            features['bluetooth_devices_day'] = 0
+            features['bluetooth_devices_night'] = 0
+            for poi in poi_types:
+                features[f'bluetooth_devices_{poi}'] = 0
+            return features
+
+        try:
+            # 预处理：转换时间戳并提取小时
+            bluetooth_data = bluetooth_data.copy()
+            bluetooth_data['timestamp'] = pd.to_numeric(bluetooth_data['timestamp'], errors='coerce')
+            bluetooth_data = bluetooth_data.dropna(subset=['timestamp'])
+            bluetooth_data['hour'] = pd.to_datetime(bluetooth_data['timestamp'], unit='s').dt.hour
+
+            # 按白天和夜晚统计扫描到的设备数量
+            day_mask = (bluetooth_data['hour'] >= self.day_start) & (bluetooth_data['hour'] < self.day_end)
+            features['bluetooth_devices_day'] = bluetooth_data[day_mask].shape[0]
+            features['bluetooth_devices_night'] = bluetooth_data[~day_mask].shape[0]
+
+
+        except Exception as e:
+            print(f"蓝牙特征提取错误: {e}")
+            features['bluetooth_devices_day'] = 0
+            features['bluetooth_devices_night'] = 0
+            for poi in poi_types:
+                features[f'bluetooth_devices_{poi}'] = 0
+
+        return features
+
+    def extract_screen_features(self, screen_data):
+        """
+        提取屏幕传感器特征（睡眠相关）
+        参数:
+            screen_data: 屏幕数据DataFrame
+        返回:
+            包含睡眠特征的字典
+        """
+        features = {}
+        if screen_data is None or screen_data.empty:
+            features['sleep_duration'] = 0
+            features['sleep_start_hour'] = 0
+            return features
+
+        try:
+            # 检查是否有锁屏事件列
+            if 'event' not in screen_data.columns:
+                # 如果没有event列，尝试使用所有数据
+                screen_data = screen_data.copy()
+                screen_data['duration'] = pd.to_numeric(screen_data['duration'], errors='coerce')
+                screen_data = screen_data[screen_data['duration'] >= 3600]  # 持续1小时以上
+            else:
+                # 只考虑锁屏事件，且持续时间超过1小时（认为是睡眠）
+                screen_data = screen_data.copy()
+                screen_data = screen_data[screen_data['event'] == 'lock']
+                screen_data['duration'] = pd.to_numeric(screen_data['duration'], errors='coerce')
+                screen_data = screen_data[screen_data['duration'] >= 3600]  # 持续1小时以上
+
+            if screen_data.empty:
+                features['sleep_duration'] = 0
+                features['sleep_start_hour'] = 0
+                return features
+
+            # 找到持续时间最长的事件作为睡眠
+            longest_sleep = screen_data.loc[screen_data['duration'].idxmax()]
+            features['sleep_duration'] = longest_sleep['duration'] / 3600.0  # 转换为小时
+            # 计算入睡时间（开始时间戳）
+            start_timestamp = longest_sleep['timestamp'] - longest_sleep['duration']
+            start_hour = pd.to_datetime(start_timestamp, unit='s').hour
+            features['sleep_start_hour'] = start_hour
+
+        except Exception as e:
+            print(f"睡眠特征提取错误: {e}")
+            features['sleep_duration'] = 0
+            features['sleep_start_hour'] = 0
+
         return features
 
     def extract_relative_features(self, absolute_features, user_history):
@@ -304,13 +384,12 @@ class FeatureExtractor:
         """
         features = {}
         
-        # 1. 并行预处理阶段
-        from concurrent.futures import ThreadPoolExecutor
+
         
         processed_data = {}
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            # 仅预处理有数据的传感器（移除已删除的蓝牙和屏幕传感器）
-            sensors = [s for s in ['wifi', 'activity', 'conversation', 'audio'] 
+        with ThreadPoolExecutor(max_workers=6) as executor:  # 增加工作线程数
+            # 预处理所有传感器
+            sensors = [s for s in ['wifi', 'activity', 'conversation', 'audio', 'bluetooth', 'screen'] 
                       if data_window.get(s) is not None]
                       
             # 批量提交预处理任务
@@ -325,14 +404,16 @@ class FeatureExtractor:
                 processed_data[sensor] = future.result()
 
         # 2. 并行特征提取阶段
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:  # 增加工作线程数
             # 提交所有特征提取任务
             extract_tasks = {
                 'poi': executor.submit(self._extract_poi_parallel, processed_data.get('wifi'), poi_locations),
                 'activity': executor.submit(self.extract_activity_features, processed_data.get('activity')),
                 'conversation': executor.submit(self._extract_conversation_parallel,
                                               processed_data.get('conversation'),
-                                              processed_data.get('audio'))
+                                              processed_data.get('audio')),
+                'bluetooth': executor.submit(self.extract_bluetooth_features, processed_data.get('bluetooth')),
+                'screen': executor.submit(self.extract_screen_features, processed_data.get('screen'))
             }
 
             # 批量获取结果
@@ -375,6 +456,13 @@ class FeatureExtractor:
             poi_locations if poi_locations is not None else pd.DataFrame()
         )
 
+    def _extract_conversation_parallel(self, conversation_data, audio_data):
+        """并行处理对话特征提取"""
+        return self.extract_conversation_features(
+            conversation_data if conversation_data is not None else pd.DataFrame(),
+            audio_data if audio_data is not None else pd.DataFrame()
+        )
+
     def _get_default_features(self, feature_type):
         """快速生成各类型默认特征"""
         defaults = {
@@ -392,15 +480,18 @@ class FeatureExtractor:
                 | {'conv_count_day':0, 'conv_duration_day':0, 'conv_count_night':0, 'conv_duration_night':0}
                 | {f'conv_count_{poi}':0 for poi in ['teaching','accommodation','eating_health']}
                 | {f'conv_duration_{poi}':0 for poi in ['teaching','accommodation','eating_health']}
-            )
+            ),
+            'bluetooth': {
+                'bluetooth_devices_day': 0,
+                'bluetooth_devices_night': 0,
+                **{f'bluetooth_devices_{poi}':0 for poi in ['teaching','accommodation','eating_health']}
+            },
+            'screen': {
+                'sleep_duration': 0,
+                'sleep_start_hour': 0
+            }
         }
         return defaults.get(feature_type, {})
-    def _extract_conversation_parallel(self, conversation_data, audio_data):
-        """并行处理对话特征提取"""
-        return self.extract_conversation_features(
-            conversation_data if conversation_data is not None else pd.DataFrame(),
-            audio_data if audio_data is not None else pd.DataFrame()
-        )
 
     def _create_default_poi_features(self):
         """快速生成默认POI特征"""
@@ -412,49 +503,3 @@ class FeatureExtractor:
         # 熵特征
         features.update({'poi_entropy_day':0, 'poi_entropy_night':0})
         return features
-        # 时间窗口特征增强
-        try:
-            # 将特征字典转换为DataFrame
-            feature_df = pd.DataFrame([features])
-            
-            # 添加滑动窗口统计特征 (24小时窗口)
-            window_features = []
-            for col in feature_df.columns:
-                if '_day' in col or '_night' in col:
-                    # 计算时间窗口内的均值和标准差
-                    window_features.extend([
-                        f'{col}_24h_mean',
-                        f'{col}_24h_std'
-                    ])
-            
-            # 特征标准化（使用RobustScaler处理异常值）
-            from sklearn.preprocessing import RobustScaler
-            scaler = RobustScaler()
-            scaled_features = scaler.fit_transform(feature_df.values)
-            
-            # 合并原始特征和标准化特征
-            final_features = {
-                **features,
-                **{f'scaled_{k}': v for k,v in zip(feature_df.columns, scaled_features[0])}
-            }
-
-            # 数据清洗和数值稳定性处理
-            import math
-            cleaned_features = {}
-            for k, v in final_features.items():
-                # 处理无穷大值
-                if isinstance(v, float) and math.isinf(v):
-                    v = 0.0 if v > 0 else -1.0
-                # 处理NaN值
-                elif isinstance(v, float) and math.isnan(v):
-                    v = 0.0
-                # 限制数值范围
-                elif isinstance(v, (int, float)):
-                    v = max(min(v, 1e6), -1e6)
-                cleaned_features[k] = v
-            
-            return cleaned_features
-            
-        except Exception as e:
-            print(f"特征后处理错误: {e}")
-            return features
